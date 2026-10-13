@@ -34,12 +34,34 @@ Pipeline giữ **mỗi nguồn một bảng Bronze riêng** và lưu **mọi c�
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+- **Cách chuẩn hoá về một schema thống nhất** (qua `stg_telemetry_a.sql` và `stg_telemetry_b.sql`):
+  - **Tên cột & kiểu dữ liệu**: Đổi toàn bộ tên cột của nguồn B (`spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering`) về cùng tên cột với nguồn A và ép kiểu số thực (`DOUBLE`), dùng `try_cast(nullif(..., '') as double)` để ô trống thành `NULL` mà không gãy truy vấn.
+  - **Đơn vị**: Tốc độ nguồn B chia `3.6` (`spd_kmh / 3.6 -> speed_mps`); bàn đạp ga/phanh nguồn B chia `100` (`throttle_pct / 100 -> gas`, `brake_pct / 100 -> brake`) để đưa về thang `0..1`.
+  - **Kiểu thời gian & độ lệch đồng hồ**: Nguồn A parse chuỗi ISO sang UTC timestamp; nguồn B lấy `timestamp_ms` trừ đi `telemetry_clock_offset_ms` (`1500 ms` từ `bronze.video_files`) rồi chia `1000.0` qua `to_timestamp((cast(timestamp_ms as bigint) - offset_ms) / 1000.0)` để về cùng đồng hồ UTC với video.
+- **Bằng chứng cho thấy đã đúng**: Sau chuẩn hoá, tốc độ tối đa của cả 2 drive đều ở mức hợp lý (`drive_a`: `71.0 km/h`, `drive_b`: `100.0 km/h`, đều `< 130 km/h`). Thời điểm mẫu đầu tiên (`bat_dau`) của `drive_b` là `2025-10-08 14:30:00.009000+00:00` (thay vì `14:30:01.509`), khớp sát với mốc bắt đầu video `14:30:00` (chênh lệch chỉ `9 ms < 0.5 s`). Tổng số dòng bảo toàn tuyệt đối: `drive_a` có `2968 sạch + 53 lỗi = 3021`; `drive_b` có `3181 sạch + 53 lỗi = 3234`.
+- **Bảng quarantine (`silver.silver_telemetry_rejects` — tổng 106 dòng)**:
+
+| drive_id | reject_reason | so_dong |
+|---|---|---|
+| drive_a | duplicate | 20 |
+| drive_a | speed_missing | 30 |
+| drive_a | speed_out_of_range | 3 |
+| drive_b | duplicate | 20 |
+| drive_b | speed_missing | 30 |
+| drive_b | speed_out_of_range | 3 |
+
+- **Vì sao đưa dòng lỗi vào `rejects` thay vì xoá**: Giúp không mất dấu dữ liệu (đối chiếu tổng số dòng `clean + quarantined == received`), cho phép theo dõi chất lượng cảm biến theo từng nguyên nhân lỗi để cảnh báo phần cứng, và có thể khôi phục/chạy lại nếu phát hiện ngưỡng lọc ban đầu đặt sai.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+- **Phân biệt `warn` và `error`**:
+  - `max_gap_ms` đặt mức `warn` vì việc cảm biến GPS/CAN bus bị rớt nhịp vài giây (do đi vào hầm, nhiễu sóng) là hiện tượng vật lý thực tế. Các mẫu còn lại vẫn đúng nên chỉ cần cảnh báo để kỹ sư nắm được chất lượng thu thập, không được chặn toàn bộ pipeline (các khung hình ở khoảng trống đó sẽ được xử lý riêng bằng cờ `sync_ok` khi join).
+  - `in_range` (kiểm tra `speed_mps` trong đoạn `[0, 70]`) đặt mức `error` vì tốc độ âm hoặc `> 70 m/s` (`> 252 km/h`) là dữ liệu sai vật lý nghiêm trọng. Nếu để lọt xuống tầng Gold sẽ làm hỏng nhãn huấn luyện mô hình xe tự lái.
+- **Kết quả thí nghiệm `break-gate` (`report/evidence/break_gate.json`)**:
+  - Khi nới ngưỡng lọc `max_speed_mps` từ `70` lên `1000 m/s`, các dòng tốc độ vô lý lọt qua bước lọc vào bảng `silver_telemetry`.
+  - Khi chạy `dbt test`, kết quả trả về `PASS=5 WARN=1 ERROR=1 SKIP=0` (`gate_failed: true`): bài test **`in_range_silver_telemetry_speed_mps__70__0`** lập tức báo **FAIL/ERROR** và bắt được chính xác **6 dòng** vi phạm (3 dòng của `drive_a` và 3 dòng của `drive_b`). Sau khi khôi phục luật gốc, kết quả trở lại `PASS=6 WARN=1 ERROR=0 SKIP=0`.
+  - **Vai trò của cổng chất lượng (Quality Gate)**: Đóng vai trò chốt chặn độc lập (circuit breaker) ngay sau bước biến đổi; nếu logic code/SQL vô tình bị sửa sai hoặc nới lỏng làm lọt dữ liệu bẩn, cổng chất lượng sẽ dừng DAG ngay lập tức để ngăn dữ liệu rác lan truyền xuống tầng Gold, Warehouse và tập huấn luyện ML.
 
 ## Bước 3 · Silver frames
 
