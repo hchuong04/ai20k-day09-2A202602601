@@ -68,18 +68,28 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+- **Số liệu từ `report/evidence/idempotency.json` (chạy lại trên `trip-00003` gồm `60` khung hình)**:
+  - **Cách của pipeline (Delta `overwrite` theo predicate `trip_id = 'trip-00003'`)**: Trước khi chạy lại bảng có **`1246` dòng** (dấu vân tay `6c7480dfde7e`); sau **2 lần chạy lại** bảng vẫn giữ nguyên **`1246` dòng** và dấu vân tay **`6c7480dfde7e`** (`unchanged: true`).
+  - **Cách ghi sai (`append`)**: Chỉ riêng `trip-00003` (vốn có `60` khung hình) sau 2 lần chạy đã phình lên thành **`120` dòng** (nhân đôi $2\times$), dẫn đến trùng lặp dữ liệu huấn luyện.
+- **Vì sao Delta `overwrite` theo partition an toàn hơn "xoá rồi ghi lại" (DELETE + INSERT)**:
+  - Delta Lake thực hiện `overwrite` với `predicate` ở dạng **giao dịch nguyên tử (ACID transaction)** thông qua `_delta_log`: dữ liệu mới được ghi ra các file Parquet mới trước, rồi mới ghi một commit duy nhất vừa đánh dấu gỡ (remove) file cũ của partition đó vừa thêm (add) file mới.
+  - Nếu làm thủ công kiểu "xoá rồi ghi lại" mà tiến trình bị sập (crash, mất điện, đầy ổ đĩa) ngay sau bước xoá và trước khi ghi xong, partition đó sẽ bị **mất trắng hoặc chỉ còn một nửa dữ liệu**, trong khi các reader đang đọc bảng tại thời điểm đó cũng thấy dữ liệu bị thiếu. Với Delta `overwrite`, nếu sập giữa chừng thì commit không được tạo và bảng vẫn giữ nguyên trạng thái đúng trước đó.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+- **Khung hình đen (`is_black`) vs Khung hình tối (`is_dark`)**:
+  - **Khung đen** (`brightness < 12.0`): Là ảnh gần như tối đen hoàn toàn do lỗi phần cứng camera, che khuất ống kính hoặc rơi gói dữ liệu video (`drive_a` có `6` khung, `drive_b` có `4` khung). Pipeline **loại bỏ** không đưa vào tập Gold.
+  - **Khung tối** (`12.0 <= brightness < 45.0`): Là cảnh thực tế khi xe đi qua đường hầm, dưới gầm cầu hoặc bóng râm dày (`drive_a` có `4` khung, `drive_b` có `61` khung). Pipeline **gắn cờ `is_dark` nhưng vẫn giữ lại** (`toi_giu_lai`). Tôi **hoàn toàn đồng ý** với cách xử lý này: nếu loại bỏ khung tối thì mô hình xe tự lái sẽ bị thiên lệch (bias), chỉ biết lái khi trời nắng đẹp và dễ gây tai nạn khi đi vào đường hầm hoặc lúc chiều tối.
+- **Lựa chọn ngưỡng dHash và mối liên hệ với tốc độ xe**:
+  - Tôi chọn **ngưỡng `2` bit** (`threshold_in_use = 2`, loại `149/602` khung ở `drive_a` và `53/644` khung ở `drive_b`). Ngưỡng `0` quá khắt khe (chỉ bắt các khung giống hệt từng bit, bỏ sót cả những khung camera bị đứng hình nhưng có nhiễu nén video MP4 nhẹ); ngược lại ngưỡng `6` quá lỏng (loại tới `363/602` khung ở `drive_a` — hơn 60% dữ liệu, làm mất cả những khung hình xe đang di chuyển thật).
+  - **Phụ thuộc vào tốc độ xe**: Khi xe dừng đèn đỏ, tắc đường hoặc chạy rất chậm (như ở `drive_a`), cảnh vật giữa 2 khung hình liên tiếp (cách nhau `0.5s` ở `2 fps`) hầu như không thay đổi nên khoảng cách Hamming của dHash rất nhỏ ($\le 2$ bit). Khi xe chạy nhanh (như `drive_b` đạt tới `100 km/h`), cảnh vật dịch chuyển nhiều hơn nên ít khung trùng hơn (`53` khung so với `149` khung ở `drive_a`).
 
 ## Bước 4 · Gold
 
