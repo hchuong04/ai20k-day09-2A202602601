@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
+| Họ và tên | Nguyễn Hữu Chương |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | 2A202602601 |
+| GitHub | https://github.com/hchuong04/ai20k-day09-2A202602601 |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
 
 ## Kết quả cuối
@@ -21,7 +21,13 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+4 khác biệt chính giữa `raw_telemetry_a` (3021 dòng) và `raw_telemetry_b` (3234 dòng) ở tầng Bronze:
+1. **Tên cột khác nhau**: Nguồn A dùng `ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer`; nguồn B dùng `timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering`.
+2. **Kiểu thời gian và đồng hồ**: Nguồn A lưu chuỗi ISO 8601 UTC (`2025-10-07T08:00:00.014Z`); nguồn B lưu số nguyên Unix epoch milliseconds (`1759933801509`) và đồng hồ thiết bị B bị lệch `+1500 ms` so với thời gian thực của video.
+3. **Đơn vị tốc độ**: Nguồn A đo bằng `m/s` (`speed_mps = 1.213`); nguồn B đo bằng `km/h` (`spd_kmh = 55.11`).
+4. **Thang đo bàn đạp ga/phanh**: Nguồn A dùng tỷ lệ thập phân `0..1` (`gas = 0.028`); nguồn B dùng phần trăm `0..100%` (`throttle_pct = 2.0`).
+
+Pipeline giữ **mỗi nguồn một bảng Bronze riêng** và lưu **mọi cột ở dạng chữ (`VARCHAR`)** vì tầng Bronze có nhiệm vụ lưu trữ nguyên bản (raw, append-only) đúng như dữ liệu từ cảm biến gửi về. Nếu gộp và ép kiểu ngay lúc ingest, các dòng có ô trống, lỗi định dạng hoặc thay đổi cấu trúc (schema drift) sẽ làm sập quá trình nạp hoặc làm mất dữ liệu gốc, khiến hệ thống không thể truy vết lỗi hay chạy lại (reprocess) khi cần cập nhật logic xử lý ở tầng Silver.
 
 ## Bước 2 · Silver telemetry
 
